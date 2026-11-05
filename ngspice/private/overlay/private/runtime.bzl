@@ -1,4 +1,4 @@
-"""Declared native runtime assembly and launcher generation for ngspice."""
+"""Declared native runtime assembly for ngspice."""
 
 visibility("//...")
 
@@ -33,6 +33,27 @@ def _runtime_impl(ctx):
         entries[destination] = (files[0], "0644")
     if ctx.file.cli:
         entries["bin/ngspice"] = (ctx.file.cli, "0755")
+        launcher_spinit = ctx.actions.declare_file(ctx.label.name + "_launcher_spinit")
+
+        # Keep the upstream-style installed spinit available to API consumers.
+        # The CLI uses this separate immutable file, with paths supplied by its
+        # native launcher. setcs preserves environment-variable and path case.
+        # The condition uses a lowercase environment name because ngspice
+        # lowercases `if` commands while reading startup files.
+        startup = [
+            "* Bazel ngspice runtime initialization",
+            "alias exit quit",
+            "alias acct rusage all",
+            "if $ngspice_bazel_has_input_dir",
+            'setcs sourcepath = ( . "$SPICE_LIB_DIR/scripts" "$NGSPICE_INPUT_DIR" )',
+            "else",
+            'setcs sourcepath = ( . "$SPICE_LIB_DIR/scripts" )',
+            "end",
+        ]
+        if ctx.attr.xspice:
+            startup += ['codemodel "$NGSPICE_CODE_MODEL_DIR/%s.cm"' % model for model in _CODE_MODELS]
+        ctx.actions.write(launcher_spinit, "\n".join(startup) + "\n")
+        entries["share/ngspice/launcher/spinit"] = (launcher_spinit, "0644")
     modules = ctx.files.code_models + ctx.files.cosimulation_modules
     if modules and not ctx.attr.xspice:
         fail("XSPICE modules must be omitted when xspice is disabled")
@@ -113,26 +134,3 @@ def ngspice_runtime(name, cli = None, code_models = [], cosimulation_modules = [
         spinit_template = source_root + "/spinit.in",
         **kwargs
     )
-
-def _launcher_impl(ctx):
-    output = ctx.actions.declare_file(ctx.label.name + ".sh")
-    runtime = ctx.file.runtime
-    if runtime.short_path.startswith("../"):
-        runfile = runtime.short_path[3:]
-    else:
-        runfile = ctx.workspace_name + "/" + runtime.short_path
-    ctx.actions.expand_template(
-        template = ctx.file._template,
-        output = output,
-        substitutions = {"@INSTALL_RUNFILE@": runfile},
-        is_executable = True,
-    )
-    return [DefaultInfo(files = depset([output]))]
-
-ngspice_launcher = rule(
-    implementation = _launcher_impl,
-    attrs = {
-        "runtime": attr.label(allow_single_file = True, mandatory = True),
-        "_template": attr.label(default = Label(":ngspice.sh.in"), allow_single_file = True),
-    },
-)

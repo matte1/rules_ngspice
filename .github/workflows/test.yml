@@ -143,6 +143,15 @@ jobs:
                 "--host_platform=@llvm//platforms:$platform"
                 --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
                 --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
+                --incompatible_strict_action_env
+                --action_env=PATH=/usr/bin:/bin
+                --action_env=LANG=C
+                --action_env=LC_ALL=C
+                --action_env=TZ=UTC
+                --test_env=PATH=/usr/bin:/bin
+                --test_env=LANG=C
+                --test_env=LC_ALL=C
+                --test_env=TZ=UTC
                 "--spawn_strategy=$sandbox"
                 --nosandbox_default_allow_network
               )

@@ -25,7 +25,8 @@ work_dir=$(mktemp -d "${TEST_TMPDIR:-${TMPDIR:-/tmp}}/ngspice-cli.XXXXXXXX")
 trap 'rm -rf "$work_dir"' EXIT
 # A real file is required: an empty directory falls through to ~/.spiceinit.
 # Keep system initialization enabled so the launcher loads its code models.
-printf '%s\n' '* Controlled initialization for the BCR test' > "$work_dir/.spiceinit"
+printf '%s\n' '* Controlled initialization for the BCR test' \
+  'echo NGSPICE_USER_INITIALIZATION_OK' > "$work_dir/.spiceinit"
 export SPICE_USERINIT_DIR="$work_dir" LC_ALL=C
 export OMP_DYNAMIC=FALSE OMP_THREAD_LIMIT=2
 cd "$work_dir"
@@ -33,20 +34,20 @@ cd "$work_dir"
 # Explicit sourcing must find both installed support scripts and caller inputs.
 # spectrum intentionally reports its usage when invoked without arguments.
 # Upstream startup used a 512-byte buffer for the combined sourcepath and
-# truncated the spinit path at 501 bytes. Exercise both limits independently
-# of Bazel's output-root length, keeping each component below NAME_MAX and
-# each full filename below macOS's 1024-byte PATH_MAX.
+# truncated the spinit path at 501 bytes. Exercise the sourcepath here and
+# the immutable spinit path in the relocated-runtime test below, independently
+# of Bazel's output-root length. Keep each component below NAME_MAX and each
+# full filename below macOS's 1024-byte PATH_MAX.
 long_path="$work_dir/Long Source Paths With MixedCase"
 while [[ ${#long_path} -lt 560 ]]; do
   long_path="$long_path/Nested Directory With MixedCase And Spaces"
 done
 export NGSPICE_INPUT_DIR="$long_path/Input Directory With MixedCase"
-export TMPDIR="$long_path/Temporary Directory With MixedCase"
-if [[ ${#NGSPICE_INPUT_DIR} -ge 900 || ${#TMPDIR} -ge 900 ]]; then
+if [[ ${#NGSPICE_INPUT_DIR} -ge 900 ]]; then
   echo 'Test temporary root leaves insufficient room for long-path regression' >&2
   exit 1
 fi
-mkdir -p "$NGSPICE_INPUT_DIR" "$TMPDIR"
+mkdir -p "$NGSPICE_INPUT_DIR"
 cat > "$NGSPICE_INPUT_DIR/input_probe" <<'EOF'
 * Input directory lookup probe
 .control
@@ -54,23 +55,38 @@ echo NGSPICE_INPUT_DIRECTORY_OK
 .endc
 .end
 EOF
-if ! "$ngspice" -b "$data_dir/runtime_scripts.cir" > scripts.log 2>&1; then
+# Upstream searches beside the netlist before SPICE_USERINIT_DIR. Use our own
+# directory to avoid picking up any unrelated .spiceinit, and exercise argv
+# forwarding with a filename containing spaces.
+script_circuit="$work_dir/Runtime Scripts With Spaces.cir"
+cp "$data_dir/runtime_scripts.cir" "$script_circuit"
+if ! PATH=/nonexistent "$ngspice" -b "$script_circuit" > scripts.log 2>&1; then
   cat scripts.log >&2
   exit 1
 fi
 # Check the printed path as well as the lookup, so lowercasing is detected even
 # on a case-insensitive filesystem where the wrong-case directory still opens.
-if ! grep -Fq 'usage: spectrum startfreq stop step vec' scripts.log ||
-   ! grep -Fxq 'NGSPICE_INPUT_DIRECTORY_OK' scripts.log ||
-   ! grep -Fq "$NGSPICE_INPUT_DIR" scripts.log; then
+check_runtime_scripts() {
+  local log=$1
+  if ! grep -Fq 'usage: spectrum startfreq stop step vec' "$log" ||
+     ! grep -Fxq 'NGSPICE_INPUT_DIRECTORY_OK' "$log" ||
+     ! grep -Fq "$NGSPICE_INPUT_DIR" "$log"; then
+    cat "$log" >&2
+    echo 'Installed or caller-provided script lookup failed' >&2
+    return 1
+  fi
+}
+check_runtime_scripts scripts.log
+if ! grep -Fxq 'NGSPICE_USER_INITIALIZATION_OK' scripts.log; then
   cat scripts.log >&2
-  echo 'Installed or caller-provided script lookup failed' >&2
+  echo 'The controlled user initialization file was not loaded' >&2
   exit 1
 fi
 
 run_circuit() {
   local circuit=$1 log=$2
-  if ! "$ngspice" -b "$circuit" > "$log" 2>&1; then
+  shift 2
+  if ! PATH=/nonexistent "$ngspice" "$@" -b "$circuit" > "$log" 2>&1; then
     cat "$log" >&2
     return 1
   fi
@@ -80,6 +96,35 @@ run_circuit() {
     return 1
   fi
 }
+
+if ! PATH=/nonexistent "$ngspice" -n -b "$script_circuit" > no-user-init.log 2>&1; then
+  cat no-user-init.log >&2
+  exit 1
+fi
+check_runtime_scripts no-user-init.log
+if grep -Fq 'NGSPICE_USER_INITIALIZATION_OK' no-user-init.log; then
+  cat no-user-init.log >&2
+  echo 'The -n option did not skip user initialization' >&2
+  exit 1
+fi
+
+# execv must preserve the simulator's status, including a deliberate nonzero
+# status from the upstream quit command.
+exit_circuit="$work_dir/Exit Status With Spaces.cir"
+cat > "$exit_circuit" <<'EOF'
+Launcher exit status forwarding
+.control
+quit 17
+.endc
+.end
+EOF
+exit_status=0
+PATH=/nonexistent "$ngspice" -b "$exit_circuit" > exit-status.log 2>&1 || exit_status=$?
+if [[ $exit_status != 17 ]]; then
+  cat exit-status.log >&2
+  echo "Expected simulator exit status 17, observed $exit_status" >&2
+  exit 1
+fi
 
 check_numeric_data() {
   local file=$1 columns=$2
@@ -100,6 +145,14 @@ check_numeric_data() {
 
 run_circuit "$data_dir/voltage_divider.cir" divider.log
 check_numeric_data divider.dat 2
+# The immutable startup must not expand a missing input-directory variable.
+# An explicitly empty value has the same meaning as an unset value.
+(
+  unset NGSPICE_INPUT_DIR
+  run_circuit "$data_dir/voltage_divider.cir" input-unset.log
+  export NGSPICE_INPUT_DIR=
+  run_circuit "$data_dir/voltage_divider.cir" input-empty.log
+)
 for feature in xspice openmp; do
   if [[ $feature == xspice ]]; then
     pattern='XSPICE extensions included'
@@ -170,6 +223,16 @@ if [[ $expect_xspice == true ]]; then
     END { exit (bad || NR < 50 || high < 10 || low < 10) }
   ' analog.dat || { cat analog.log >&2; echo 'XSPICE analog gain failed' >&2; exit 1; }
 
+  # -n skips user initialization, but system startup must still load models.
+  cp analog.dat analog-with-user-init.dat
+  rm analog.dat
+  run_circuit "$data_dir/xspice_analog.cir" analog-no-user-init.log -n
+  if ! cmp -s analog-with-user-init.dat analog.dat; then
+    cat analog-no-user-init.log >&2
+    echo 'XSPICE analog results changed when user initialization was skipped' >&2
+    exit 1
+  fi
+
   run_circuit "$data_dir/xspice_digital.cir" digital.log
   check_numeric_data digital.dat 3
   awk '
@@ -222,9 +285,9 @@ if [[ $expect_openmp == true ]]; then
 fi
 
 if [[ -n ${TEST_SRCDIR:-} && ${NGSPICE_BCR_MANIFEST_TEST:-0} == 0 ]]; then
-  # Re-run the complete suite with only a manifest and a runtime path containing
-  # spaces and uppercase letters. This exercises the launcher and quoted
-  # code-model paths together.
+  # Re-run the complete suite with only a manifest and a runtime path longer
+  # than the former spinit limit, containing spaces and uppercase letters.
+  # This exercises immutable startup, the launcher, and quoted model paths.
   # Sandboxed sh_test executions may have only the symlink tree, without its
   # MANIFEST file. Find the native runtime tree without a repository name.
   runtime_directories=()
@@ -241,7 +304,10 @@ if [[ -n ${TEST_SRCDIR:-} && ${NGSPICE_BCR_MANIFEST_TEST:-0} == 0 ]]; then
   runtime_key=${runtime_directory#"$TEST_SRCDIR/"}
   # Check optional co-simulation assets as well as the models loaded by the
   # simulator. Bazel may represent tree-artifact files as sandbox runfile links.
-  runtime_assets=(share/ngspice/scripts/{spinit,setplot,spectrum})
+  runtime_assets=(
+    share/ngspice/launcher/spinit
+    share/ngspice/scripts/{spinit,setplot,spectrum}
+  )
   if [[ $expect_xspice == true ]]; then
     runtime_assets+=(
       lib/ngspice/{spice2poly,analog,digital,xtradev,xtraevt,table,tlines}.cm
@@ -266,13 +332,19 @@ if [[ -n ${TEST_SRCDIR:-} && ${NGSPICE_BCR_MANIFEST_TEST:-0} == 0 ]]; then
       exit 1
     fi
   done
-  if grep -Eq '@pkglibdir@|@XSPICEINIT@|bazel-out/|/execroot/' \
-      "$runtime_directory/share/ngspice/scripts/spinit"; then
-    echo 'Installed spinit contains unresolved placeholders or a build path' >&2
+  for init_file in scripts/spinit launcher/spinit; do
+    if grep -Eq '@[A-Za-z_][A-Za-z_0-9]*@|bazel-out/|/execroot/' \
+        "$runtime_directory/share/ngspice/$init_file"; then
+      echo "Installed $init_file contains unresolved placeholders or a build path" >&2
+      exit 1
+    fi
+  done
+  relocated_runtime="$long_path/Runtime With MixedCase And Spaces"
+  if [[ ${#relocated_runtime} -ge 850 ]]; then
+    echo 'Test temporary root leaves insufficient room for relocated runtime assets' >&2
     exit 1
   fi
-  relocated_runtime="$work_dir/Runtime With MixedCase And Spaces"
-  mkdir "$relocated_runtime"
+  mkdir -p "$relocated_runtime"
   # Materialize sandbox runfile links so this copy can run independently of the
   # original tree. Make the copy writable for cleanup of read-only Bazel outputs.
   cp -RL "$runtime_directory/." "$relocated_runtime/"
@@ -282,14 +354,8 @@ if [[ -n ${TEST_SRCDIR:-} && ${NGSPICE_BCR_MANIFEST_TEST:-0} == 0 ]]; then
     exit 1
   fi
   relocated_manifest="$work_dir/relocated_manifest"
-  runfiles_library=bazel_tools/tools/bash/runfiles/runfiles.bash
-  if [[ ! -f "$TEST_SRCDIR/$runfiles_library" ]]; then
-    echo 'The Bash runfiles library is missing from test runfiles' >&2
-    exit 1
-  fi
   {
     printf '%s %s\n' "$runtime_key" "$relocated_runtime"
-    printf '%s %s\n' "$runfiles_library" "$TEST_SRCDIR/$runfiles_library"
     if [[ -f "$TEST_SRCDIR/_repo_mapping" ]]; then
       printf '%s %s\n' _repo_mapping "$TEST_SRCDIR/_repo_mapping"
     fi
@@ -302,7 +368,7 @@ if [[ -n ${TEST_SRCDIR:-} && ${NGSPICE_BCR_MANIFEST_TEST:-0} == 0 ]]; then
     export TMPDIR="$work_dir/temporary directory with spaces"
     bash "$test_script" "$ngspice" "$expect_xspice" "$expect_openmp"
   )
-  echo 'ngspice manifest-only runtime path with spaces passed'
+  echo 'ngspice manifest-only long runtime path with spaces passed'
 fi
 
 echo "ngspice CLI smoke passed (xspice=$expect_xspice, openmp=$expect_openmp)"

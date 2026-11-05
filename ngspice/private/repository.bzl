@@ -11,7 +11,7 @@ _OVERLAY = {
     "private/config.bzl": "private/config.bzl",
     "private/config.h.in": "private/config.h.in",
     "private/core.bzl": "private/core.bzl",
-    "private/ngspice.sh.in": "private/ngspice.sh.in",
+    "private/launcher.cc": "private/launcher.cc",
     "private/outputs.bzl": "private/outputs.bzl",
     "private/runtime.bzl": "private/runtime.bzl",
     "private/runtime_tool.cc": "private/runtime_tool.cc",

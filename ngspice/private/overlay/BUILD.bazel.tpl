@@ -1,11 +1,11 @@
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("//private:config.bzl", "ngspice_config")
 load("//private:core.bzl", "ngspice_libraries")
 load("//private:outputs.bzl", "linking_only", "openmp_header")
-load("//private:runtime.bzl", "ngspice_launcher", "ngspice_runtime")
+load("//private:runtime.bzl", "ngspice_runtime")
 load("//private:xspice.bzl", "ngspice_code_models", "ngspice_cosimulation_modules")
 
 package(default_visibility = ["//visibility:private"])
@@ -135,15 +135,12 @@ ngspice_runtime(
     }),
 )
 
-ngspice_launcher(
-    name = "cli_launcher",
-    runtime = ":cli_runtime",
-)
-
-sh_binary(
+cc_binary(
     name = "ngspice_bin",
-    srcs = [":cli_launcher"],
+    srcs = ["//private:launcher.cc"],
+    copts = ["-std=c++17"],
     data = [":cli_runtime"],
+    target_compatible_with = SUPPORTED_PLATFORMS,
     visibility = ["//visibility:public"],
-    deps = ["@bazel_tools//tools/bash/runfiles"],
+    deps = ["@rules_cc//cc/runfiles"],
 )

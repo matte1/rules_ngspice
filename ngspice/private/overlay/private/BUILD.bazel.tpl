@@ -1,11 +1,13 @@
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 
 exports_files(
-    [
-        "config.h.in",
-        "ngspice.sh.in",
-    ],
+    ["config.h.in"],
     visibility = ["//visibility:private"],
+)
+
+exports_files(
+    ["launcher.cc"],
+    visibility = ["//:__pkg__"],
 )
 
 cc_binary(

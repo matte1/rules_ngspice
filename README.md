@@ -9,7 +9,7 @@ OpenMP are enabled by default.
 Add to `MODULE.bazel`:
 
 ```starlark
-bazel_dep(name = "rules_ngspice", version = "0.1.0")
+bazel_dep(name = "rules_ngspice", version = "0.1.1")
 
 ngspice = use_extension("@rules_ngspice//:extensions.bzl", "ngspice")
 use_repo(ngspice, "ngspice")
@@ -28,7 +28,7 @@ bazel run @ngspice//:ngspice_bin -- -b "$(pwd)/circuit.cir"
 ```
 
 The CLI loads its bundled code models automatically. User `.spiceinit` files
-still apply; `-n` skips initialization, including code-model loading.
+still apply; `-n` skips user initialization while bundled code models still load.
 
 Disable XSPICE or OpenMP independently:
 
@@ -39,6 +39,7 @@ bazel build @ngspice//:ngspice --@ngspice//:openmp=false
 
 OpenMP parallelizes BSIM3/BSIM4 device evaluation. Set the thread count with
 ngspice's `set num_threads=<n>` command. You choose the C/C++ toolchain.
+For a pinned compiler setup, see [LLVM configuration](docs/hermetic-llvm.md).
 
 ## Embedding
 
