@@ -1,0 +1,12 @@
+package(default_visibility = ["//visibility:private"])
+
+exports_files(
+    glob([
+        "overlay/**",
+        "patches/*.patch",
+    ]),
+    visibility = [
+        "//:__pkg__",
+        "//ngspice/private:__pkg__",
+    ],
+)

@@ -1,0 +1,104 @@
+diff --git a/src/frontend/cpitf.c b/src/frontend/cpitf.c
+--- a/src/frontend/cpitf.c
++++ b/src/frontend/cpitf.c
+@@ -33,7 +33,7 @@
+ ft_cpinit(void)
+ {
+     bool found = FALSE, t = TRUE;
+-    char buf[BSIZE_SP], **x, *s, *r, *copys;
++    char buf[BSIZE_SP], **x, *s, *copys;
+     struct comm *c;
+     int i;
+     FILE *fp;
+@@ -246,15 +246,19 @@
+        may be overridden by environmental variable SPICE_LIB_DIR in ivars().
+        Lib_Path has been set to Spice_Lib_Dir adding /scripts in ivars() */
+     if (Lib_Path && *Lib_Path) {
+-        /* set variable 'sourcepath' */
+-        if (Inp_Path && *Inp_Path)
+-            (void) sprintf(buf, "sourcepath = ( %s %s %s )", DIR_CWD, Lib_Path, Inp_Path);
+-        else
+-            (void) sprintf(buf, "sourcepath = ( %s %s )", DIR_CWD, Lib_Path);
+-
++        /* Paths may exceed BSIZE_SP, especially when combined. Keep the
++           existing lexer and glob expansion for the sourcepath value. */
+         {
++            char *sourcepath;
+             wordlist *wl;
+-            wl = cp_doglob(cp_lexer(buf));
++
++            if (Inp_Path && *Inp_Path)
++                sourcepath = tprintf("sourcepath = ( %s %s %s )", DIR_CWD, Lib_Path, Inp_Path);
++            else
++                sourcepath = tprintf("sourcepath = ( %s %s )", DIR_CWD, Lib_Path);
++
++            wl = cp_doglob(cp_lexer(sourcepath));
++            tfree(sourcepath);
+             com_set(wl);
+             wl_free(wl);
+         }
+@@ -264,33 +268,23 @@
+         if (!cp_getvar("no_spinit", CP_BOOL, NULL, 0)) {
+             /* jump over leading spaces */
+             for (copys = s = cp_tildexpand(Lib_Path); copys && *copys; ) {
++                char *initfile;
++
+                 s = skip_ws(s);
+-                /* copy s into buf until end of s, r is the actual position in buf */
+-                int ii;
+-                for (r = buf, ii = 0; *s; r++, s++, ii++) {
+-                    *r = *s;
+-                    if (ii > 500) {
+-                        fprintf(stderr, "Warning: spinit path is too long.\n");
+-                        break;
+-                    }
+-                }
++#ifdef TCL_MODULE
++                initfile = tprintf("%s%stclspinit", s, DIR_PATHSEP);
++#else
++                initfile = tprintf("%s%sspinit", s, DIR_PATHSEP);
++#endif
+                 tfree(copys);
+-                /* add a path separator to buf at actual position */
+-                (void)strcpy(r, DIR_PATHSEP);
+-#ifdef TCL_MODULE
+-                /* add "tclspinit" to buf after actual position */
+-                (void) strcat(r, "tclspinit");
+-#else
+-                /* add "spinit" to buf after actual position */
+-                (void)strcat(r, "spinit");
+-#endif
+-
+-                if ((fp = fopen(buf, "r")) != NULL) {
++
++                if ((fp = fopen(initfile, "r")) != NULL) {
+ 
+                     cp_interactive = FALSE;
+-                    inp_spsource(fp, TRUE, buf, FALSE);
++                    inp_spsource(fp, TRUE, initfile, FALSE);
+                     cp_interactive = TRUE;
+                     found = TRUE;
++                    tfree(initfile);
+                     break;
+ 
+ #if defined(HAS_WINGUI) || defined(__MINGW32__) || defined(_MSC_VER)
+@@ -303,15 +297,17 @@
+                 else if ((fp = fopen("./spinit", "r")) != NULL) {
+ #endif
+                     cp_interactive = FALSE;
+-                    inp_spsource(fp, TRUE, buf, FALSE);
++                    inp_spsource(fp, TRUE, initfile, FALSE);
+                     cp_interactive = TRUE;
+                     found = TRUE;
++                    tfree(initfile);
+                     break;
+ #endif
+                 }
+                 else if (ft_controldb) {
+-                    fprintf(cp_err, "Warning: can't open \"%s\".\n", buf);
++                    fprintf(cp_err, "Warning: can't open \"%s\".\n", initfile);
+                 }
++                tfree(initfile);
+             }
+ 
+             if (!found) {

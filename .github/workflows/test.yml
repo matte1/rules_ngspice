@@ -1,0 +1,154 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: GCC / Bazel 8
+            runner: ubuntu-24.04
+            bazel: '8.8.2'
+            compiler: gcc
+            xspice: 'true'
+            openmp: 'true'
+          - name: GCC / Bazel 9
+            runner: ubuntu-24.04
+            bazel: '9.3.1'
+            compiler: gcc
+            xspice: 'true'
+            openmp: 'true'
+          - name: GCC / XSPICE off
+            runner: ubuntu-24.04
+            bazel: '9.3.1'
+            compiler: gcc
+            xspice: 'false'
+            openmp: 'true'
+          - name: GCC / OpenMP off
+            runner: ubuntu-24.04
+            bazel: '9.3.1'
+            compiler: gcc
+            xspice: 'true'
+            openmp: 'false'
+          - name: GCC / XSPICE and OpenMP off
+            runner: ubuntu-24.04
+            bazel: '9.3.1'
+            compiler: gcc
+            xspice: 'false'
+            openmp: 'false'
+          - name: Clang / Linux
+            runner: ubuntu-24.04
+            bazel: '9.3.1'
+            compiler: clang
+            xspice: 'true'
+            openmp: 'true'
+          - name: Clang / macOS
+            runner: macos-15
+            bazel: '9.3.1'
+            compiler: clang
+            xspice: 'true'
+            openmp: 'true'
+          - name: Hermetic LLVM / Linux
+            runner: ubuntu-24.04
+            bazel: '9.3.1'
+            compiler: llvm
+            xspice: 'true'
+            openmp: 'true'
+          - name: Hermetic LLVM / macOS
+            runner: macos-15
+            bazel: '9.3.1'
+            compiler: llvm
+            xspice: 'true'
+            openmp: 'true'
+    defaults:
+      run:
+        shell: bash
+        working-directory: tests
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Bazel
+        env:
+          BAZEL_VERSION: ${{ matrix.bazel }}
+        run: |
+          platform="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          filename="bazel-$BAZEL_VERSION-$platform-$(uname -m)"
+          release="https://github.com/bazelbuild/bazel/releases/download/$BAZEL_VERSION"
+          mkdir -p "$RUNNER_TEMP/bazel-download" "$RUNNER_TEMP/bin"
+          cd "$RUNNER_TEMP/bazel-download"
+          curl --fail --location --retry 5 --retry-all-errors "$release/$filename" --output "$filename"
+          curl --fail --location --retry 5 --retry-all-errors "$release/$filename.sha256" --output "$filename.sha256"
+          shasum -a 256 --check "$filename.sha256"
+          install -m 0755 "$filename" "$RUNNER_TEMP/bin/bazel"
+          printf '%s\n' "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Enable Linux sandboxing
+        if: matrix.compiler == 'llvm' && runner.os == 'Linux'
+        run: |
+          if ! unshare --user --map-root-user --net true; then
+            # Ubuntu's AppArmor policy can restrict user namespaces on hosted VMs.
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --net true
+
+      - name: Test API, CLI, and OpenMP coexistence
+        env:
+          COMPILER: ${{ matrix.compiler }}
+          XSPICE: ${{ matrix.xspice }}
+          OPENMP: ${{ matrix.openmp }}
+        run: |
+          flags=("--@ngspice//:xspice=$XSPICE" "--@ngspice//:openmp=$OPENMP")
+          targets=(//:all)
+          case "$COMPILER" in
+            gcc)
+              export CC=gcc CXX=g++
+              targets+=(//gcc_openmp:consumer)
+              ;;
+            clang)
+              export CC=clang CXX=clang++
+              targets+=(//clang_openmp:consumer)
+              ;;
+            llvm)
+              unset CC CXX
+              cat hermetic_llvm.MODULE.bazel >> MODULE.bazel
+              if [[ "$RUNNER_OS" == Linux ]]; then
+                platform=linux_x86_64_gnu.2.28
+                sandbox=linux-sandbox
+              else
+                platform=macos_aarch64
+                sandbox=darwin-sandbox
+                flags+=(--repo_env=BAZEL_MACOS_USE_HOST_SDK=0)
+              fi
+              flags+=(
+                --extra_toolchains=@llvm//toolchain:all
+                "--platforms=@llvm//platforms:$platform"
+                "--host_platform=@llvm//platforms:$platform"
+                --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+                --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
+                "--spawn_strategy=$sandbox"
+                --nosandbox_default_allow_network
+              )
+              targets+=(//clang_openmp:consumer)
+              ;;
+          esac
+          bazel --ignore_all_rc_files --host_jvm_args=-Xmx3g test \
+            --jobs=3 --test_output=errors --verbose_failures \
+            "${flags[@]}" "${targets[@]}"
